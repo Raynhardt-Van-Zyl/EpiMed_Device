@@ -1,7 +1,6 @@
-#include <Arduino.h>
+#include <bluefruit.h>
 #include <Wire.h>
 #include <vl53l4cd_class.h>
-#include <ArduinoBLE.h>
 
 // Pin definitions
 #define XSHUT_PIN D7
@@ -32,41 +31,44 @@
 
 VL53L4CD sensor_vl53l4cd_sat(&Wire, XSHUT_PIN);
 
-// BLE service and characteristic UUIDs
-BLEService epiPenService("19B10000-E8F2-537E-4F6C-D104768A1214");
-BLEFloatCharacteristic voltageCharacteristic("19B10001-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify);
-BLEUnsignedShortCharacteristic distanceCharacteristic("19B10002-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify);
-BLEBoolCharacteristic chargingStatusCharacteristic("19B10003-E8F2-537E-4F6C-D104768A1214", BLERead | BLENotify);
-BLECharCharacteristic commandCharacteristic("19B10004-E8F2-537E-4F6C-D104768A1214", BLERead | BLEWrite);
-BLECharacteristic rgbCharacteristic("19B10005-E8F2-537E-4F6C-D104768A1214", BLERead | BLEWrite, 3, true);
+// BLE Service
+BLEDfu  bledfu;  // OTA DFU service
+BLEDis  bledis;  // device information
+BLEUart bleuart; // uart over ble
+BLEBas  blebas;  // battery
 
 void setup() {
-  // Initialize BLE
-  if (!BLE.begin()) {
-    while (1);
-  }
+  Serial.begin(115200);
 
-  // Set up the BLE device
-  BLE.setLocalName("EpiPen");
-  BLE.setAdvertisedService(epiPenService);
+  Serial.println("EpiPen BLE UART Example");
+  Serial.println("------------------------\n");
 
-  // Add characteristics to the service
-  epiPenService.addCharacteristic(voltageCharacteristic);
-  epiPenService.addCharacteristic(distanceCharacteristic);
-  epiPenService.addCharacteristic(chargingStatusCharacteristic);
-  epiPenService.addCharacteristic(commandCharacteristic);
-  epiPenService.addCharacteristic(rgbCharacteristic);
+  // Setup the BLE LED to be enabled on CONNECT
+  Bluefruit.autoConnLed(true);
 
-  // Add the service
-  BLE.addService(epiPenService);
+  Bluefruit.begin();
+  Bluefruit.setTxPower(4);    // Check bluefruit.h for supported values
+  Bluefruit.setName("EpiPen");
+  Bluefruit.Periph.setConnectCallback(connect_callback);
+  Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
 
-  // Set initial values for characteristics
-  voltageCharacteristic.writeValue(0.0);
-  distanceCharacteristic.writeValue(0);
-  chargingStatusCharacteristic.writeValue(false);
+  // To be consistent OTA DFU should be added first if it exists
+  bledfu.begin();
 
-  // Start advertising
-  BLE.advertise();
+  // Configure and Start Device Information Service
+  bledis.setManufacturer("Adafruit Industries");
+  bledis.setModel("EpiPen");
+  bledis.begin();
+
+  // Configure and Start BLE Uart Service
+  bleuart.begin();
+
+  // Start BLE Battery Service
+  blebas.begin();
+  blebas.write(100);
+
+  // Set up and start advertising
+  startAdv();
 
   // Set up battery management pins
   pinMode(GPIO_BATTERY_CHARGE_SPEED, OUTPUT);
@@ -96,6 +98,26 @@ void setup() {
 
   checkChargingStatus();
   readVoltage();
+
+  Serial.println("Please use Adafruit's Bluefruit LE app to connect in UART mode");
+}
+
+void startAdv(void) {
+  // Advertising packet
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addTxPower();
+
+  // Include bleuart 128-bit uuid
+  Bluefruit.Advertising.addService(bleuart);
+
+  // Secondary Scan Response packet (optional)
+  // Since there is no room for 'Name' in Advertising packet
+  Bluefruit.ScanResponse.addName();
+  
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.setInterval(32, 244);    // in unit of 0.625 ms
+  Bluefruit.Advertising.setFastTimeout(30);      // number of seconds in fast mode
+  Bluefruit.Advertising.start(0);                // 0 = Don't stop advertising after n seconds  
 }
 
 float readVBAT(void) {
@@ -124,13 +146,19 @@ bool isCharging() {
 
 void checkChargingStatus() {
   bool charging = isCharging();
-  chargingStatusCharacteristic.writeValue(charging);
+  bleuart.print("Charging status: ");
+  bleuart.println(charging ? "Charging" : "Not charging");
 }
 
 void readVoltage() {
   float vbat_v = readVBAT() / 1000.0;
   float vbat_per = lipoToPercent(vbat_v);
-  voltageCharacteristic.writeValue(vbat_v);
+  // bleuart.print("Voltage: ");
+  // bleuart.print(vbat_v, 2);
+  // bleuart.print("V (");
+  bleuart.print(vbat_per, 2);
+  // bleuart.println("%)");
+  // blebas.write(vbat_per);
 }
 
 float lipoToPercent(float voltage) {
@@ -149,7 +177,11 @@ void readDistance() {
   uint8_t status = sensor_vl53l4cd_sat.VL53L4CD_GetResult(&results);
   
   if (!status) {
-    distanceCharacteristic.writeValue(results.distance_mm);
+    bleuart.print("Distance: ");
+    bleuart.print(results.distance_mm);
+    bleuart.println(" mm");
+  } else {
+    bleuart.println("Error reading distance");
   }
 }
 
@@ -166,30 +198,46 @@ void handleCommand(char command) {
       break;
     case '4':
       setFastCharging(true);
+      bleuart.println("Fast charging enabled");
       break;
     case '5':
       setFastCharging(false);
+      bleuart.println("Slow charging enabled");
       break;
+    default:
+      bleuart.println("Unknown command");
   }
 }
 
 void loop() {
-  BLEDevice central = BLE.central();
-  
-  if (central) {
-    while (central.connected()) {
-      if (commandCharacteristic.written()) {
-        char command = commandCharacteristic.value();
-        handleCommand(command);
-      }
-      
-      if (rgbCharacteristic.written()) {
-        uint8_t rgbValues[3];
-        rgbCharacteristic.readValue(rgbValues, 3);
-        setRGBColor(rgbValues[0], rgbValues[1], rgbValues[2]);
-      }
+  // Forward from BLEUART to HW Serial
+  while (bleuart.available()) {
+    char ch = (char) bleuart.read();
+    if (ch >= '1' && ch <= '9') {  // Check if it's a valid command
+      handleCommand(ch);
+    } else if (ch != '\n' && ch != '\r') {  // Ignore newline and carriage return
+      bleuart.println("Unknown command");
     }
   }
-  
+
   sensor_vl53l4cd_sat.VL53L4CD_ClearInterrupt();
+}
+
+// callback invoked when central connects
+void connect_callback(uint16_t conn_handle) {
+  // Get the reference to current connection
+  BLEConnection* connection = Bluefruit.Connection(conn_handle);
+
+  char central_name[32] = { 0 };
+  connection->getPeerName(central_name, sizeof(central_name));
+
+  Serial.print("Connected to ");
+  Serial.println(central_name);
+}
+
+void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
+  (void) conn_handle;
+  (void) reason;
+
+  Serial.println("Disconnected");
 }
