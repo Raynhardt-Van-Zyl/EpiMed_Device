@@ -56,8 +56,8 @@ void setup() {
   bledfu.begin();
 
   // Configure and Start Device Information Service
-  bledis.setManufacturer("Adafruit Industries");
-  bledis.setModel("EpiPen");
+  bledis.setManufacturer("EpiMed");
+  bledis.setModel("V1");
   bledis.begin();
 
   // Configure and Start BLE Uart Service
